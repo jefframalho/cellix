@@ -257,7 +257,7 @@ const Store = (() => { const mem = {}; return {
   get(k){ try { const v = localStorage.getItem(k); if (v != null) return JSON.parse(v); } catch(e){} return mem[k] ?? null; },
   set(k, v){ mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
 }; })();
-const ERR = {'auth/invalid-credential':'E-mail ou senha incorretos','auth/wrong-password':'E-mail ou senha incorretos','auth/user-not-found':'E-mail ou senha incorretos','auth/email-already-in-use':'Este e-mail já tem cadastro','auth/weak-password':'A senha precisa ter pelo menos 6 caracteres','auth/invalid-email':'E-mail inválido','permission-denied':'Sem permissão (assinatura bloqueada ou acesso negado)'};
+const ERR = {'auth/invalid-credential':'E-mail ou senha incorretos','auth/wrong-password':'E-mail ou senha incorretos','auth/user-not-found':'E-mail ou senha incorretos','auth/email-already-in-use':'Este e-mail já tem cadastro','auth/weak-password':'A senha precisa ter pelo menos 6 caracteres','auth/invalid-email':'E-mail inválido','auth/configuration-not-found':'O login por e-mail ainda não foi ativado no Firebase (Authentication)','auth/operation-not-allowed':'O login por e-mail/senha está desativado no Firebase','auth/unauthorized-domain':'Este endereço não está nos domínios autorizados do Firebase','permission-denied':'Sem permissão (assinatura bloqueada ou acesso negado)'};
 const errMsg = e => ERR[e?.code] || e?.message || 'Erro inesperado';
 
 /* ---------- Pix copia e cola (BR Code) ---------- */
