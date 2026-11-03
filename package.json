@@ -1,0 +1,22 @@
+{
+  "name": "cellix",
+  "version": "1.0.0",
+  "description": "Cellix — gestão para lojas de celular",
+  "main": "main.js",
+  "author": "Jefferson Ramalho",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "br.com.cellix.app",
+    "productName": "Cellix",
+    "files": ["index.html", "main.js"],
+    "win": { "target": "nsis" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "shortcutName": "Cellix" }
+  }
+}

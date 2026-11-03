@@ -1,0 +1,56 @@
+rules_version = '2';
+// Regras do Cellix — cole em Firebase Console > Firestore Database > Regras > Publicar.
+// TROQUE o e-mail abaixo pelo(s) e-mail(s) de administrador (o mesmo de CONFIG.superadmins no index.html).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signed()  { return request.auth != null; }
+    function isSuper() { return signed() && request.auth.token.email in ['jeffersonramalhopb@gmail.com']; }
+    function temPerfil() { return signed() && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid)); }
+    function perfil()  { return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data; }
+    function membro(eid) { return temPerfil() && perfil().empresaId == eid && perfil().ativo != false; }
+    function gestor(eid) { return membro(eid) && perfil().papel in ['dono', 'gerente']; }
+    function empresa(eid) { return get(/databases/$(database)/documents/empresas/$(eid)).data; }
+    // bloqueia gravações quando a mensalidade venceu (3 dias de tolerância) ou foi bloqueada
+    function emDia(eid) { return empresa(eid).status != 'bloqueado' && request.time.toMillis() < empresa(eid).vencimento + 3 * 86400000; }
+
+    // Empresas (assinantes)
+    match /empresas/{eid} {
+      allow read: if isSuper() || membro(eid) || (signed() && resource.data.donoUid == request.auth.uid);
+      allow list: if isSuper();
+      // cadastro: só pode criar a própria empresa, ativa, com no máximo 8 dias de teste
+      allow create: if signed()
+        && request.resource.data.donoUid == request.auth.uid
+        && request.resource.data.status == 'ativo'
+        && request.resource.data.vencimento <= request.time.toMillis() + 8 * 86400000;
+      // dono/gerente mexe em dados da empresa, mas nunca em vencimento, status, plano ou dono
+      allow update: if isSuper() || (gestor(eid)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['vencimento', 'status', 'plano', 'donoUid', 'pagamentos']));
+      allow delete: if isSuper();
+
+      // Dados da empresa (lojas, vendas, OS, estoque...)
+      match /{col}/{docId} {
+        allow read: if isSuper() || membro(eid);
+        allow write: if membro(eid) && emDia(eid);
+      }
+    }
+
+    // Perfis de usuários (login -> empresa, função, lojas)
+    match /usuarios/{uid} {
+      allow read: if isSuper() || (signed() && request.auth.uid == uid)
+        || (temPerfil() && resource.data.empresaId == perfil().empresaId);
+      allow create: if
+        // dono criando o próprio perfil logo após cadastrar a empresa
+        (signed() && request.auth.uid == uid && request.resource.data.papel == 'dono'
+          && empresa(request.resource.data.empresaId).donoUid == request.auth.uid)
+        // gestor criando funcionário (gerente só cria vendedor/técnico)
+        || (gestor(request.resource.data.empresaId) && request.resource.data.papel != 'dono'
+          && (request.resource.data.papel != 'gerente' || perfil().papel == 'dono'));
+      allow update: if isSuper() || (gestor(resource.data.empresaId)
+        && resource.data.papel != 'dono'
+        && request.resource.data.empresaId == resource.data.empresaId
+        && request.resource.data.papel != 'dono');
+      allow delete: if isSuper();
+    }
+  }
+}
