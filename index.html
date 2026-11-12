@@ -180,6 +180,8 @@ const CONFIG = {
     { id: 'pro',    nome: 'Pro',    lojas: 3,  preco: 159.90 },
     { id: 'rede',   nome: 'Rede',   lojas: 10, preco: 279.90 }
   ],
+  // Plano por número de lojas: preço = base (1ª loja) + lojaExtra para cada loja a mais. Os "planos" acima só valem para contas antigas.
+  preco: { base: 89.90, lojaExtra: 30.00, maxLojas: 50 },
   diasTeste: 7,        // teste grátis ao criar conta
   toleranciaDias: 3    // dias depois do vencimento até bloquear
 };
@@ -285,7 +287,10 @@ const userNome = id => D('usuarios').find(u => u.id === id)?.nome || '—';
 const pode = papeis => papeis.includes(S.perfil?.papel);
 const prox = col => D(col).reduce((m, x) => Math.max(m, x.numero || 0), 0) + 1;
 const cfg = () => ({garantiaNovo:365, garantiaSeminovo:90, garantiaAcessorio:90, garantiaOS:90, termoOS:'', rodape:'', ...(S.empresa?.config || {})});
-const planoDe = id => CONFIG.planos.find(p => p.id === id) || CONFIG.planos[0];
+const precoLojas = n => +(CONFIG.preco.base + Math.max(0, n - 1) * CONFIG.preco.lojaExtra).toFixed(2);
+const nLojas = v => Math.min(CONFIG.preco.maxLojas, Math.max(1, parseInt(v) || 1));
+const planoDe = id => { const m = /^lojas:(\d+)$/.exec(id || ''); if (m){ const n = nLojas(m[1]); return {id:'lojas:' + n, nome:'Personalizado', lojas:n, preco:precoLojas(n)}; } return CONFIG.planos.find(p => p.id === id) || CONFIG.planos[0]; };
+const txtLojas = n => n + ' loja' + (n > 1 ? 's' : '');
 const novoCarrinho = () => ({itens:[], desconto:0, clienteId:'', troca:null, pagamentos:[]});
 const caixaAberto = (L = S.lojaId) => D('caixas').find(c => c.lojaId === L && c.status === 'aberto');
 const cliList = () => D('clientes').slice().sort((a, b) => a.nome.localeCompare(b.nome));
@@ -409,7 +414,7 @@ function renderAuth(tab = 'login'){
       <div class="f"><label>Seu nome</label><input name="nome" required></div>
       <div class="f"><label>Nome da loja / empresa</label><input name="empresa" required></div>
       <div class="fg"><div><label>WhatsApp</label><input name="telefone" required placeholder="(88) 9 9999-9999"></div>
-      <div><label>Plano</label><select name="plano">${CONFIG.planos.map(p => `<option value="${p.id}">${p.nome} — ${p.lojas} loja${p.lojas>1?'s':''} — ${brl(p.preco)}/mês</option>`).join('')}</select></div></div>
+      <div><label>Quantas lojas?</label><input name="lojas" type="number" min="1" max="${CONFIG.preco.maxLojas}" value="1" required oninput="$('#cad-preco').textContent=brl(precoLojas(nLojas(this.value))) + '/mês'"><small class="mut" id="cad-preco">${brl(precoLojas(1))}/mês</small></div></div>
       <div class="f"><label>E-mail</label><input name="email" type="email" required></div>
       <div class="f"><label>Senha (mínimo 6)</label><input name="senha" type="password" minlength="6" required></div>
       <button class="btn pri big">Criar minha conta</button>
@@ -425,7 +430,7 @@ async function doCadastro(e){
   try {
     const u = await B.signup(f.email.toLowerCase(), f.senha);
     const eid = uid(), now = Date.now();
-    await B.set('empresas/' + eid, {nome:f.empresa, email:f.email.toLowerCase(), telefone:f.telefone, plano:f.plano, donoUid:u, status:'ativo', vencimento:now + CONFIG.diasTeste * DIA, criadoEm:now, config:{}});
+    await B.set('empresas/' + eid, {nome:f.empresa, email:f.email.toLowerCase(), telefone:f.telefone, plano:'lojas:' + nLojas(f.lojas), donoUid:u, status:'ativo', vencimento:now + CONFIG.diasTeste * DIA, criadoEm:now, config:{}});
     await B.set('usuarios/' + u, {empresaId:eid, nome:f.nome, email:f.email.toLowerCase(), papel:'dono', lojas:'todas', ativo:true, criadoEm:now});
     await B.set(`empresas/${eid}/lojas/${uid()}`, {nome:f.empresa, telefone:f.telefone, ativa:true, criadoEm:now});
     S.cadastrando = false;
@@ -451,7 +456,7 @@ function estadoAssinatura(){
 }
 function pixBox(){
   const p = planoDe(S.empresa.plano), code = pixPayload(p.preco, 'CELLIX' + S.empresa.id.slice(0, 10));
-  return `<p class="mut">Plano <b style="color:var(--tx)">${p.nome}</b> — <b style="color:var(--tx)">${brl(p.preco)}/mês</b>. Pague pelo Pix e envie o comprovante. A liberação é feita em seguida.</p>
+  return `<p class="mut">Plano <b style="color:var(--tx)">${txtLojas(p.lojas)}</b> — <b style="color:var(--tx)">${brl(p.preco)}/mês</b>. Pague pelo Pix e envie o comprovante. A liberação é feita em seguida.</p>
   <div style="text-align:center"><div id="qr"></div></div>
   <label>Pix copia e cola</label><div class="row nw"><input id="pix-code" readonly value="${esc(code)}"><button class="btn" onclick="navigator.clipboard.writeText($('#pix-code').value).then(()=>toast('Código Pix copiado'))">Copiar</button></div>
   <div class="row mt"><button class="btn ok" onclick="jaPaguei()">Já paguei</button><button class="btn" onclick="abrirWa('${CONFIG.whatsappSuporte}','Olá! Segue o comprovante da mensalidade do Cellix — ${esc(S.empresa.nome.replace(/'/g,''))}')">${ico('wa')} Enviar comprovante</button></div>
@@ -1389,14 +1394,32 @@ async function salvarUsuario(id, btn){
 VIEWS.assinatura = () => {
   const e = S.empresa, p = planoDe(e.plano), est = estadoAssinatura();
   main(`<div class="grid g2"><div class="card"><h3>Sua assinatura</h3>
-    <div class="tot mt"><span class="mut">Plano</span><b>${p.nome} — ${brl(p.preco)}/mês</b></div><div class="tot"><span class="mut">Lojas incluídas</span><b>${p.lojas}</b></div>
+    <div class="tot mt"><span class="mut">Plano</span><b>${txtLojas(p.lojas)} — ${brl(p.preco)}/mês</b></div><div class="tot"><span class="mut">Lojas incluídas</span><b>${p.lojas}</b></div>
     <div class="tot"><span class="mut">Vence em</span><b>${dt(e.vencimento)}</b></div><div class="tot"><span class="mut">Situação</span>${est.aviso ? '<span class="tag warn">Atenção</span>' : '<span class="tag ok">Em dia</span>'}</div>
-    ${e.planoSolicitado ? `<p class="mt" style="color:#fbbf24">Mudança para o plano ${planoDe(e.planoSolicitado).nome} solicitada — será aplicada após a confirmação.</p>` : ''}
-    <h3 class="sub">Mudar de plano</h3><div class="plans">${CONFIG.planos.map(x => `<div class="plan ${x.id === e.plano ? 'on' : ''}"><small class="mut">${x.nome}</small><b>${brl(x.preco)}</b><small class="mut">${x.lojas} loja${x.lojas > 1 ? 's' : ''}</small>${x.id !== e.plano ? `<button class="btn sm mt" onclick="pedirPlano('${x.id}')">Solicitar</button>` : '<div class="mt"><span class="tag pri">Atual</span></div>'}</div>`).join('')}</div></div>
+    ${e.planoSolicitado ? `<p class="mt" style="color:#fbbf24">Mudança para ${txtLojas(planoDe(e.planoSolicitado).lojas)} (${brl(planoDe(e.planoSolicitado).preco)}/mês) solicitada — será aplicada após a confirmação.</p>` : ''}
+    <h3 class="sub">Quantas lojas você precisa?</h3>
+    <div class="row nw mb"><button class="btn" onclick="plStep(-1)">−</button><input id="pl-n" type="number" min="1" max="${CONFIG.preco.maxLojas}" value="${planoDe(e.planoSolicitado || e.plano).lojas}" style="width:90px;text-align:center" oninput="plPreco()"><button class="btn" onclick="plStep(1)">+</button></div>
+    <div class="plan on"><small class="mut" id="pl-det"></small><b id="pl-preco"></b><small class="mut">por mês</small></div>
+    <p class="mut mt">1ª loja ${brl(CONFIG.preco.base)} + ${brl(CONFIG.preco.lojaExtra)} por loja a mais.</p>
+    <button class="btn pri mt" id="pl-btn" onclick="pedirLojas()">Solicitar mudança</button></div>
   <div class="card"><h3 class="mb">Pagar mensalidade</h3>${pixBox()}</div></div>`);
-  desenharQR();
+  desenharQR(); plPreco();
 };
-async function pedirPlano(id){ await B.update('empresas/' + S.empresa.id, {planoSolicitado:id}); S.empresa.planoSolicitado = id; toast('Solicitação enviada'); abrirWa(CONFIG.whatsappSuporte, `Olá! Quero mudar o plano do Cellix da ${S.empresa.nome} para ${planoDe(id).nome}.`); render(); }
+const plN = () => nLojas($('#pl-n')?.value);
+function plStep(d){ $('#pl-n').value = nLojas(plN() + d); plPreco(); }
+function plPreco(){
+  const n = plN(), atual = planoDe(S.empresa.plano).lojas;
+  $('#pl-preco').textContent = brl(precoLojas(n)); $('#pl-det').textContent = txtLojas(n) + (n === atual ? ' (seu plano atual)' : '');
+  $('#pl-btn').disabled = n === atual;
+}
+async function pedirLojas(){
+  const n = plN(), ativas = D('lojas').filter(l => l.ativa !== false).length;
+  if (n === planoDe(S.empresa.plano).lojas) return;
+  if (n < ativas) return toast(`Você tem ${ativas} lojas ativas. Desative ${ativas - n} em "Lojas e equipe" antes de reduzir.`, 'warn');
+  const id = 'lojas:' + n;
+  await B.update('empresas/' + S.empresa.id, {planoSolicitado:id}); S.empresa.planoSolicitado = id; toast('Solicitação enviada');
+  abrirWa(CONFIG.whatsappSuporte, `Olá! Quero mudar o plano do Cellix da ${S.empresa.nome} para ${txtLojas(n)} (${brl(precoLojas(n))}/mês).`); render();
+}
 
 /* =====================================================================
    ADMIN CELLIX (você)
@@ -1414,14 +1437,14 @@ function renderAdmin(){
   <div class="row mb"><h3>Assinantes</h3><span class="sp"></span><input style="max-width:260px" placeholder="Buscar empresa ou e-mail" value="${esc(S.f.aq || '')}" onchange="S.f.aq=this.value;renderAdmin()"></div>
   <div class="card tw"><table><thead><tr><th>Empresa</th><th>Plano</th><th>Vencimento</th><th>Situação</th><th>Ações</th></tr></thead><tbody>
   ${lista.map(e => `<tr><td><b>${esc(e.nome)}</b><br><small>${esc(e.email)} · ${esc(e.telefone || '')} · desde ${dt(e.criadoEm)}</small></td>
-  <td><select style="width:auto" onchange="admPlano('${e.id}',this.value)">${CONFIG.planos.map(p => `<option value="${p.id}" ${e.plano === p.id ? 'selected' : ''}>${p.nome} ${brl(p.preco)}</option>`).join('')}</select>${e.planoSolicitado ? `<br><small style="color:#fbbf24">pediu ${planoDe(e.planoSolicitado).nome}</small>` : ''}</td>
+  <td><div class="row nw"><input type="number" min="1" max="${CONFIG.preco.maxLojas}" style="width:70px" value="${planoDe(e.plano).lojas}" onchange="admLojas('${e.id}',this.value)"><small>loja(s) · ${brl(planoDe(e.plano).preco)}/mês</small></div>${e.planoSolicitado ? `<small style="color:#fbbf24">pediu ${txtLojas(planoDe(e.planoSolicitado).lojas)} (${brl(planoDe(e.planoSolicitado).preco)}) <a onclick="admLojas('${e.id}',${planoDe(e.planoSolicitado).lojas})">aplicar</a></small>` : ''}</td>
   <td>${dt(e.vencimento)}</td><td><span class="tag ${st(e)[1]}">${st(e)[0]}</span>${e.pagamentoInformadoEm ? `<br><small style="color:#4ade80">informou pagamento ${dth(e.pagamentoInformadoEm)}</small>` : ''}</td>
   <td><div class="row"><button class="btn sm ok" onclick="admPago('${e.id}')">Pago +30 dias</button><button class="btn sm ${e.status === 'bloqueado' ? '' : 'bad'}" onclick="admBloq('${e.id}')">${e.status === 'bloqueado' ? 'Desbloquear' : 'Bloquear'}</button>${e.telefone ? `<button class="btn sm" onclick="abrirWa('${esc(e.telefone)}','Olá! Aqui é do Cellix. Sua mensalidade vence em ${dt(e.vencimento)}.')">${ico('wa')}</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhuma empresa.</td></tr>'}</tbody></table></div>`);
 }
 async function admUpd(id, patch){ try { await B.update('empresas/' + id, patch); Object.assign(S.adminEmps.find(e => e.id === id), patch); if (S.empresa?.id === id) Object.assign(S.empresa, patch); renderAdmin(); toast('Atualizado'); } catch(e){ toast(errMsg(e), 'bad'); } }
 function admPago(id){ const e = S.adminEmps.find(x => x.id === id); const venc = Math.max(Date.now(), e.vencimento || 0) + 30 * DIA; admUpd(id, {vencimento:venc, status:'ativo', pagamentoInformadoEm:null, pagamentos:[...(e.pagamentos || []), {data:Date.now(), valor:planoDe(e.plano).preco, ate:venc}]}); }
 function admBloq(id){ const e = S.adminEmps.find(x => x.id === id); admUpd(id, {status:e.status === 'bloqueado' ? 'ativo' : 'bloqueado'}); }
-function admPlano(id, plano){ admUpd(id, {plano, planoSolicitado:null}); }
+function admLojas(id, n){ admUpd(id, {plano:'lojas:' + nLojas(n), planoSolicitado:null}); }
 
 /* =====================================================================
    DADOS DE DEMONSTRAÇÃO
