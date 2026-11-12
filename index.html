@@ -186,7 +186,7 @@ const CONFIG = {
 
 /* ===================================================================== */
 const DIA = 86400000;
-const COLS = ['lojas','clientes','produtos','aparelhos','vendas','os','avaliacoes','caixas','movimentos','transferencias'];
+const COLS = ['lojas','clientes','produtos','aparelhos','vendas','os','avaliacoes','caixas','movimentos','transferencias','estoqueMov','inventarios'];
 const FORMAS = ['Dinheiro','Pix','Cartão de débito','Cartão de crédito','Outro'];
 const STATUS_OS = ['Recebido','Em análise','Aguardando aprovação','Aprovado','Em reparo','Aguardando peça','Pronto','Entregue','Cancelado'];
 const COR_OS = {'Recebido':'pri','Em análise':'vio','Aguardando aprovação':'warn','Aprovado':'pri','Em reparo':'vio','Aguardando peça':'warn','Pronto':'ok','Entregue':'','Cancelado':'bad'};
@@ -204,6 +204,7 @@ const MENU = [
   {id:'avaliacoes',nome:'Seminovos / troca',ic:'troca',papeis:['dono','gerente','vendedor']},
   {id:'aparelhos',nome:'Aparelhos (IMEI)',ic:'cel',papeis:TODOS},
   {id:'produtos',nome:'Acessórios e peças',ic:'box',papeis:TODOS},
+  {id:'estoque',nome:'Controle de estoque',ic:'estq',papeis:GESTAO},
   {id:'transferencias',nome:'Transferências',ic:'transf',papeis:GESTAO},
   {id:'clientes',nome:'Clientes',ic:'cli',papeis:TODOS},
   {id:'config',nome:'Lojas e equipe',ic:'cfg',papeis:GESTAO},
@@ -219,6 +220,7 @@ const IC = {
   troca:'<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
   cel:'<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
   box:'<path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.7z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/>',
+  estq:'<path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/>',
   transf:'<path d="M16 3h5v5M21 3l-7 7M8 21H3v-5M3 21l7-7"/>',
   cli:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>',
   cfg:'<circle cx="12" cy="12" r="3"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
@@ -635,13 +637,14 @@ async function finalizarVenda(btn){
     if (c.troca){
       const av = byId('avaliacoes', c.troca.avaliacaoId);
       const ap = await save('aparelhos', {marca:av.marca, modelo:av.modelo, armazenamento:av.armazenamento, cor:av.cor, imei:av.imei, condicao:'seminovo', bateria:av.bateria, custo:+av.valorOferecido || 0, preco:+av.valorVenda || 0, lojaId:L, status:'disponivel', origem:'troca', avaliacaoId:av.id, obs:av.obs || ''});
+      await movAp('troca', ap, 1, L, 'Entrada por troca (avaliação)');
       await save('avaliacoes', {...av, status:'usada', aparelhoId:ap.id, usadaEm:now});
       troca = {...c.troca, aparelhoId:ap.id};
     }
     const venda = await save('vendas', {numero:prox('vendas'), lojaId:L, caixaId:cx.id, vendedorId:S.user.uid, clienteId:c.clienteId || '', itens:c.itens, subtotal:t.sub, desconto:+c.desconto || 0, total:t.total, troca, pagamentos:c.pagamentos, troco:t.troco, data:now, status:'concluida'});
     for (const i of c.itens){
-      if (i.tipo === 'aparelho'){ const a = byId('aparelhos', i.refId); await save('aparelhos', {...a, status:'vendido', vendaId:venda.id, vendidoEm:now}); }
-      else { const p = byId('produtos', i.refId); await save('produtos', {...p, estoque:{...p.estoque, [L]:(p.estoque?.[L] || 0) - i.qtd}}); }
+      if (i.tipo === 'aparelho'){ const a = byId('aparelhos', i.refId); await save('aparelhos', {...a, status:'vendido', vendaId:venda.id, vendidoEm:now}); await movAp('venda', a, -1, L, 'Venda #' + pad(venda.numero)); }
+      else { await mudaEstoque(i.refId, L, -i.qtd, 'venda', 'Venda #' + pad(venda.numero)); }
     }
     S.cart = novoCarrinho();
     render();
@@ -761,8 +764,8 @@ function vendaDetalhe(id){
 async function cancelarVenda(id){
   const v = byId('vendas', id); const motivo = prompt('Motivo do cancelamento (os itens voltam para o estoque):'); if (motivo === null) return;
   for (const i of v.itens){
-    if (i.tipo === 'aparelho'){ const a = byId('aparelhos', i.refId); if (a && a.vendaId === v.id) await save('aparelhos', {...a, status:'disponivel', vendaId:null, vendidoEm:null}); }
-    else { const p = byId('produtos', i.refId); if (p) await save('produtos', {...p, estoque:{...p.estoque, [v.lojaId]:(p.estoque?.[v.lojaId] || 0) + i.qtd}}); }
+    if (i.tipo === 'aparelho'){ const a = byId('aparelhos', i.refId); if (a && a.vendaId === v.id){ await save('aparelhos', {...a, status:'disponivel', vendaId:null, vendidoEm:null}); await movAp('cancelamento', a, 1, v.lojaId, 'Venda #' + pad(v.numero) + ' cancelada', motivo); } }
+    else { await mudaEstoque(i.refId, v.lojaId, i.qtd, 'cancelamento', 'Venda #' + pad(v.numero) + ' cancelada', motivo); }
   }
   await save('vendas', {...v, status:'cancelada', canceladaEm:Date.now(), canceladaPor:S.user.uid, motivoCancelamento:motivo});
   closeModal(); toast('Venda cancelada e estoque devolvido'); render();
@@ -851,7 +854,7 @@ async function osReceber(entregar, btn){
     if (pago + valor < t - 0.004 && !confirm(`Ainda falta receber ${brl(t - pago - valor)}. Entregar mesmo assim?`)){ if (valor > 0) o.pagamentos.pop(); return; }
     o.status = 'Entregue'; o.entregueEm = Date.now(); o.garantiaAte = Date.now() + (o.garantiaDias || 0) * DIA;
     o.historico = [...(o.historico || []), {status:'Entregue', data:Date.now(), por:S.user.uid}];
-    if (!o.estoqueBaixado){ for (const i of o.itens.filter(i => i.produtoId)){ const p = byId('produtos', i.produtoId); if (p) await save('produtos', {...p, estoque:{...p.estoque, [o.lojaId]:(p.estoque?.[o.lojaId] || 0) - 1}}); } o.estoqueBaixado = true; }
+    if (!o.estoqueBaixado){ for (const i of o.itens.filter(i => i.produtoId)) await mudaEstoque(i.produtoId, o.lojaId, -1, 'os', 'OS #' + pad(o.numero)); o.estoqueBaixado = true; }
   }
   btn.disabled = true;
   await save('os', o); toast(entregar ? 'OS entregue' : 'Pagamento registrado'); renderOSBody(); scheduleRender();
@@ -904,7 +907,7 @@ function avaliacaoModal(finalidade){
 async function salvarAv(finalidade, btn){
   const f = form('f-av'); if (!f.clienteId) return toast('Selecione o cliente', 'warn');
   if (!imeiValido(f.imei)) return toast('IMEI inválido — confira os 15 dígitos', 'bad');
-  if (D('aparelhos').some(a => a.imei === f.imei && a.status !== 'vendido')) return toast('Este IMEI já está no seu estoque', 'bad');
+  if (D('aparelhos').some(a => a.imei === f.imei && !['vendido','baixado'].includes(a.status))) return toast('Este IMEI já está no seu estoque', 'bad');
   if (btn) btn.disabled = true;
   const checklist = {}; CHECK_AV.forEach((c, k) => checklist[c] = !!f['chk' + k]);
   const a = await save('avaliacoes', {lojaId:S.lojaId, finalidade, clienteId:f.clienteId, marca:f.marca, modelo:f.modelo, armazenamento:f.armazenamento, cor:f.cor, bateria:+f.bateria || null, imei:f.imei, checklist, obs:f.obs, valorOferecido:num(f.valorOferecido), valorVenda:num(f.valorVenda), status:'pendente', avaliadoPor:S.user.uid});
@@ -924,7 +927,7 @@ function avDetalhe(id){
 }
 async function aprovarAv(id, btn){
   const a = byId('avaliacoes', id);
-  if (D('aparelhos').some(x => x.imei === a.imei && x.status !== 'vendido')) return toast('Este IMEI já está no estoque', 'bad');
+  if (D('aparelhos').some(x => x.imei === a.imei && !['vendido','baixado'].includes(x.status))) return toast('Este IMEI já está no estoque', 'bad');
   if (a.finalidade === 'troca'){ btn.disabled = true; await save('avaliacoes', {...a, status:'aprovada', aprovadoEm:Date.now(), aprovadoPor:S.user.uid}); closeModal(); toast('Aprovada! Use no PDV como entrada.'); return render(); }
   const forma = $('#av-forma').value;
   if (forma === 'Dinheiro do caixa'){
@@ -933,6 +936,7 @@ async function aprovarAv(id, btn){
   }
   btn.disabled = true;
   const ap = await save('aparelhos', {marca:a.marca, modelo:a.modelo, armazenamento:a.armazenamento, cor:a.cor, imei:a.imei, condicao:'seminovo', bateria:a.bateria, custo:a.valorOferecido, preco:a.valorVenda || 0, lojaId:a.lojaId, status:'disponivel', origem:'compra', avaliacaoId:a.id, obs:a.obs || ''});
+  await movAp('compra_seminovo', ap, 1, a.lojaId, 'Compra de ' + cliNome(a.clienteId));
   await save('avaliacoes', {...a, status:'comprada', formaPagamento:forma, aparelhoId:ap.id, aprovadoEm:Date.now(), aprovadoPor:S.user.uid});
   closeModal(); toast('Aparelho comprado e lançado no estoque'); render(); printAv(byId('avaliacoes', id));
 }
@@ -951,7 +955,7 @@ function printAv(a){
 /* =====================================================================
    APARELHOS (IMEI)
    ===================================================================== */
-const ST_AP = {disponivel:['Disponível','ok'], reservado:['Reservado','warn'], em_transito:['Em trânsito','vio'], vendido:['Vendido',''], defeito:['Com defeito','bad']};
+const ST_AP = {disponivel:['Disponível','ok'], reservado:['Reservado','warn'], em_transito:['Em trânsito','vio'], vendido:['Vendido',''], defeito:['Com defeito','bad'], baixado:['Baixado (perda/devolução)','bad']};
 VIEWS.aparelhos = () => {
   const f = S.f.ap || (S.f.ap = {st:'disponivel', cond:'', q:''}); const q = f.q.toLowerCase(); const custo = pode(GESTAO);
   let lista = D('aparelhos').filter(naLoja);
@@ -976,17 +980,20 @@ function aparelhoModal(id){
   <div class="fg"><div><label>Fornecedor / nota fiscal</label><input name="fornecedor" value="${esc(a.fornecedor)}"></div><div><label>Status</label><select name="status" ${a.status === 'vendido' || a.status === 'em_transito' ? 'disabled' : ''}>${Object.entries(ST_AP).filter(([k]) => a.status === k || ['disponivel','reservado','defeito'].includes(k)).map(([k, v]) => `<option value="${k}" ${a.status === k ? 'selected' : ''}>${v[0]}</option>`).join('')}</select></div></div>
   <div class="f"><label>Observações</label><input name="obs" value="${esc(a.obs)}"></div>
   ${venda ? `<p class="mut mb">Vendido na venda <a onclick="closeModal();vendaDetalhe('${venda.id}')">#${pad(venda.numero)}</a> em ${dth(venda.data)} para ${esc(cliNome(venda.clienteId))}.</p>` : ''}
-  <div class="row"><button class="btn pri">Salvar</button><span class="sp"></span>${id && a.status !== 'vendido' ? `<button type="button" class="btn bad" onclick="excluirAparelho('${id}')">Excluir</button>` : ''}</div></form>`, {wide:true});
+  <div class="row"><button class="btn pri">Salvar</button>${id ? `<button type="button" class="btn" onclick="verHistorico('${esc(a.imei)}')">Histórico</button>` : ''}<span class="sp"></span>${id && a.status !== 'vendido' ? `<button type="button" class="btn bad" onclick="excluirAparelho('${id}')">Excluir</button>` : ''}</div></form>`, {wide:true});
 }
 async function salvarAparelho(id){
   const f = form('f-ap'), old = id ? byId('aparelhos', id) : {};
   if (!imeiValido(f.imei)) return toast('IMEI 1 inválido — confira os 15 dígitos', 'bad');
   if (f.imei2 && !imeiValido(f.imei2)) return toast('IMEI 2 inválido', 'bad');
-  if (D('aparelhos').some(a => a.id !== id && a.status !== 'vendido' && (a.imei === f.imei || a.imei2 === f.imei))) return toast('Já existe um aparelho com este IMEI no estoque', 'bad');
-  await save('aparelhos', {...old, id:id || undefined, marca:f.marca, modelo:f.modelo, armazenamento:f.armazenamento, cor:f.cor, condicao:f.condicao, imei:f.imei, imei2:f.imei2, bateria:+f.bateria || null, custo:num(f.custo), preco:num(f.preco), lojaId:f.lojaId || old.lojaId, fornecedor:f.fornecedor, status:f.status || old.status, obs:f.obs});
+  if (D('aparelhos').some(a => a.id !== id && !['vendido','baixado'].includes(a.status) && (a.imei === f.imei || a.imei2 === f.imei))) return toast('Já existe um aparelho com este IMEI no estoque', 'bad');
+  const ap = await save('aparelhos', {...old, id:id || undefined, marca:f.marca, modelo:f.modelo, armazenamento:f.armazenamento, cor:f.cor, condicao:f.condicao, imei:f.imei, imei2:f.imei2, bateria:+f.bateria || null, custo:num(f.custo), preco:num(f.preco), lojaId:f.lojaId || old.lojaId, fornecedor:f.fornecedor, status:f.status || old.status, obs:f.obs});
+  if (!id){ if (emEst(ap.status)) await movAp('cadastro', ap, 1, ap.lojaId, 'Cadastro do aparelho', f.fornecedor); }
+  else if (emEst(old.status) && emEst(ap.status) && old.lojaId !== ap.lojaId){ await movAp('ajuste', old, -1, old.lojaId, 'Mudou para ' + lojaNome(ap.lojaId)); await movAp('ajuste', ap, 1, ap.lojaId, 'Veio de ' + lojaNome(old.lojaId)); }
+  else if (emEst(old.status) !== emEst(ap.status)) await movAp(emEst(ap.status) ? 'ajuste' : (ap.status === 'defeito' ? 'defeito' : 'baixa'), ap, emEst(ap.status) ? 1 : -1, ap.lojaId, 'Status: ' + (ST_AP[old.status]?.[0] || old.status) + ' → ' + (ST_AP[ap.status]?.[0] || ap.status));
   closeModal(); toast('Aparelho salvo'); render();
 }
-async function excluirAparelho(id){ if (!confirm('Excluir este aparelho do estoque?')) return; await apagar('aparelhos', id); closeModal(); toast('Excluído'); render(); }
+async function excluirAparelho(id){ if (!confirm('Excluir este aparelho do estoque?')) return; const ap0 = byId('aparelhos', id); if (ap0 && emEst(ap0.status)) await movAp('baixa', ap0, -1, ap0.lojaId, 'Excluído do cadastro'); await apagar('aparelhos', id); closeModal(); toast('Excluído'); render(); }
 
 /* =====================================================================
    ACESSÓRIOS E PEÇAS
@@ -998,7 +1005,7 @@ VIEWS.produtos = () => {
   main(`<div class="row mb">${pode(GESTAO) ? '<button class="btn pri" onclick="produtoModal()">+ Novo produto</button>' : ''}<div class="tabs" style="margin:0">${['', 'Acessório', 'Peça', 'Outro'].map(c => `<button class="${f.cat === c ? 'on' : ''}" onclick="S.f.pr.cat='${c}';render()">${c || 'Todos'}</button>`).join('')}</div><span class="sp"></span><input style="max-width:260px" placeholder="Buscar nome ou código" value="${esc(f.q)}" onchange="S.f.pr.q=this.value;render()"></div>
   <div class="card tw"><table><thead><tr><th>Código</th><th>Produto</th><th>Categoria</th>${pode(GESTAO) ? '<th class="r">Custo</th>' : ''}<th class="r">Preço</th>${lojas.map(L => `<th class="r">${lojas.length > 1 ? esc(lojaNome(L)) : 'Estoque'}</th>`).join('')}<th></th></tr></thead><tbody>
   ${lista.map(p => `<tr><td><small>${esc(p.codigo || '—')}</small></td><td><b>${esc(p.nome)}</b></td><td>${esc(p.categoria)}</td>${pode(GESTAO) ? `<td class="r">${brl(p.custo)}</td>` : ''}<td class="r">${brl(p.preco)}</td>${lojas.map(L => `<td class="r"><span class="tag ${(p.estoque?.[L] || 0) <= (p.minimo || 0) ? 'bad' : 'ok'}">${p.estoque?.[L] || 0}</span></td>`).join('')}
-  <td class="r">${pode(GESTAO) ? `<button class="btn sm" onclick="entradaEstoque('${p.id}')">+ Entrada</button> <button class="btn sm ghost" onclick="produtoModal('${p.id}')">Editar</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">Nenhum produto cadastrado.</td></tr>'}</tbody></table></div>`);
+  <td class="r">${pode(GESTAO) ? `<button class="btn sm" onclick="entradaEstoque('${p.id}')">+ Entrada</button> <button class="btn sm ghost" onclick="ajusteModal('${p.id}')">Ajustar</button> <button class="btn sm ghost" onclick="verHistoricoProd('${p.id}')">Histórico</button> <button class="btn sm ghost" onclick="produtoModal('${p.id}')">Editar</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">Nenhum produto cadastrado.</td></tr>'}</tbody></table></div>`);
 };
 function produtoModal(id){
   const p = id ? byId('produtos', id) : {categoria:'Acessório', estoque:{}, minimo:2};
@@ -1006,23 +1013,24 @@ function produtoModal(id){
   <div class="fg"><div><label>Nome *</label><input name="nome" value="${esc(p.nome)}" required></div><div><label>Código de barras / SKU</label><input name="codigo" value="${esc(p.codigo)}"></div></div>
   <div class="fg"><div><label>Categoria</label><select name="categoria">${optS(['Acessório','Peça','Outro'], p.categoria)}</select></div><div><label>Estoque mínimo (alerta)</label><input name="minimo" type="number" value="${p.minimo || 0}"></div></div>
   <div class="fg"><div><label>Custo (R$)</label><input name="custo" value="${fmtN(p.custo)}"></div><div><label>Preço de venda (R$) *</label><input name="preco" value="${fmtN(p.preco)}" required></div></div>
-  <label>Estoque por loja</label><div class="fg3">${lojasPermitidas().map(L => `<div><label>${esc(lojaNome(L))}</label><input type="number" name="est_${L}" value="${p.estoque?.[L] || 0}"></div>`).join('')}</div>
+  <label>Estoque por loja${id ? ' <small class="mut">(para mudar, use + Entrada, Ajustar ou Inventário)</small>' : ''}</label><div class="fg3">${lojasPermitidas().map(L => `<div><label>${esc(lojaNome(L))}</label><input type="number" name="est_${L}" value="${p.estoque?.[L] || 0}" ${id ? 'readonly' : ''}></div>`).join('')}</div>
   <div class="row"><button class="btn pri">Salvar</button><span class="sp"></span>${id ? `<button type="button" class="btn bad" onclick="desativarProduto('${id}')">Desativar</button>` : ''}</div></form>`);
 }
 async function salvarProduto(id){
   const f = form('f-pr'), old = id ? byId('produtos', id) : {}; const estoque = {...(old.estoque || {})};
   lojasPermitidas().forEach(L => estoque[L] = parseInt(f['est_' + L]) || 0);
   if (f.codigo && D('produtos').some(p => p.id !== id && p.codigo === f.codigo && p.ativo !== false)) return toast('Já existe produto com este código', 'bad');
-  await save('produtos', {...old, id:id || undefined, nome:f.nome, codigo:f.codigo, categoria:f.categoria, minimo:parseInt(f.minimo) || 0, custo:num(f.custo), preco:num(f.preco), estoque, ativo:true});
+  const novo = await save('produtos', {...old, id:id || undefined, nome:f.nome, codigo:f.codigo, categoria:f.categoria, minimo:parseInt(f.minimo) || 0, custo:num(f.custo), preco:num(f.preco), estoque, ativo:true});
+  for (const L of lojasPermitidas()){ const d = (estoque[L] || 0) - (old.estoque?.[L] || 0); if (d) await movEst({tipo:id ? 'ajuste' : 'cadastro', item:'produto', itemId:novo.id, nome:f.nome, codigo:f.codigo || '', lojaId:L, qtd:d, saldo:estoque[L], ref:id ? 'Edição do cadastro' : 'Estoque inicial', motivo:'', valor:num(f.custo) * Math.abs(d)}); }
   closeModal(); toast('Produto salvo'); render();
 }
 async function desativarProduto(id){ if (!confirm('Desativar este produto?')) return; await save('produtos', {...byId('produtos', id), ativo:false}); closeModal(); render(); }
 function entradaEstoque(id){
   const p = byId('produtos', id), L0 = S.lojaId === '*' ? lojasPermitidas()[0] : S.lojaId;
   openModal('Entrada de estoque — ' + esc(p.nome), `<form id="f-ent" onsubmit="event.preventDefault();salvarEntrada('${id}')"><div class="fg"><div><label>Loja</label><select name="lojaId">${opts(lojasPermitidas().map(i => byId('lojas', i)), L0)}</select></div><div><label>Quantidade</label><input name="qtd" type="number" min="1" value="1" required></div></div>
-  <div class="f"><label>Custo unitário desta compra (R$)</label><input name="custo" value="${fmtN(p.custo)}"></div><button class="btn pri big">Lançar entrada</button></form>`);
+  <div class="f"><label>Custo unitário desta compra (R$)</label><input name="custo" value="${fmtN(p.custo)}"></div><div class="f"><label>Fornecedor / nota fiscal (opcional)</label><input name="ref"></div><button class="btn pri big">Lançar entrada</button></form>`);
 }
-async function salvarEntrada(id){ const f = form('f-ent'), p = byId('produtos', id), q = parseInt(f.qtd) || 0; if (q <= 0) return; await save('produtos', {...p, custo:num(f.custo) || p.custo, estoque:{...p.estoque, [f.lojaId]:(p.estoque?.[f.lojaId] || 0) + q}}); closeModal(); toast(`+${q} un. em ${lojaNome(f.lojaId)}`); render(); }
+async function salvarEntrada(id){ const f = form('f-ent'), p = byId('produtos', id), q = parseInt(f.qtd) || 0; if (q <= 0) return; const custo = num(f.custo) || p.custo; if (custo !== p.custo) await save('produtos', {...p, custo}); await mudaEstoque(id, f.lojaId, q, 'entrada', f.ref ? 'Compra: ' + f.ref : 'Entrada de mercadoria'); closeModal(); toast(`+${q} un. em ${lojaNome(f.lojaId)}`); render(); }
 
 /* =====================================================================
    TRANSFERÊNCIAS ENTRE LOJAS
@@ -1049,16 +1057,247 @@ async function enviarTransf(btn){
   const prods = Object.keys(f).filter(k => k.startsWith('pr_') && parseInt(f[k]) > 0).map(k => { const p = byId('produtos', k.slice(3)); return {id:p.id, nome:p.nome, qtd:Math.min(parseInt(f[k]), p.estoque[O] || 0)}; }).filter(p => p.qtd > 0);
   if (!f.destino) return toast('Escolha o destino', 'warn'); if (!apIds.length && !prods.length) return toast('Selecione pelo menos um item', 'warn');
   if (btn) btn.disabled = true;
-  for (const id of apIds){ const a = byId('aparelhos', id); await save('aparelhos', {...a, status:'em_transito'}); }
-  for (const x of prods){ const p = byId('produtos', x.id); await save('produtos', {...p, estoque:{...p.estoque, [O]:(p.estoque[O] || 0) - x.qtd}}); }
-  await save('transferencias', {numero:prox('transferencias'), origemId:O, destinoId:f.destino, aparelhos:apIds.map(id => ({id, nome:apNome(byId('aparelhos', id)), imei:byId('aparelhos', id).imei})), produtos:prods, status:'enviada', enviadoPor:S.user.uid, enviadoEm:Date.now()});
+  const nTr = prox('transferencias'), refT = 'Transferência #' + pad(nTr) + ' para ' + lojaNome(f.destino);
+  for (const id of apIds){ const a = byId('aparelhos', id); await save('aparelhos', {...a, status:'em_transito'}); await movAp('transf_saida', a, -1, O, refT); }
+  for (const x of prods) await mudaEstoque(x.id, O, -x.qtd, 'transf_saida', refT);
+  await save('transferencias', {numero:nTr, origemId:O, destinoId:f.destino, aparelhos:apIds.map(id => ({id, nome:apNome(byId('aparelhos', id)), imei:byId('aparelhos', id).imei})), produtos:prods, status:'enviada', enviadoPor:S.user.uid, enviadoEm:Date.now()});
   closeModal(); toast('Transferência enviada'); render();
 }
 async function receberTransf(id, btn){
   const t = byId('transferencias', id); btn.disabled = true;
-  for (const x of t.aparelhos){ const a = byId('aparelhos', x.id); if (a) await save('aparelhos', {...a, lojaId:t.destinoId, status:'disponivel'}); }
-  for (const x of t.produtos){ const p = byId('produtos', x.id); if (p) await save('produtos', {...p, estoque:{...p.estoque, [t.destinoId]:(p.estoque?.[t.destinoId] || 0) + x.qtd}}); }
+  const refT = 'Transferência #' + pad(t.numero) + ' de ' + lojaNome(t.origemId);
+  for (const x of t.aparelhos){ const a = byId('aparelhos', x.id); if (a){ const a2 = await save('aparelhos', {...a, lojaId:t.destinoId, status:'disponivel'}); await movAp('transf_entrada', a2, 1, t.destinoId, refT); } }
+  for (const x of t.produtos) await mudaEstoque(x.id, t.destinoId, x.qtd, 'transf_entrada', refT);
   await save('transferencias', {...t, status:'recebida', recebidoPor:S.user.uid, recebidoEm:Date.now()}); toast('Recebimento confirmado'); render();
+}
+
+/* =====================================================================
+   CONTROLE DE ESTOQUE (movimentações, ajustes, inventário, reposição)
+   ===================================================================== */
+const emEst = s => s === 'disponivel' || s === 'reservado';
+const MOV_TIPO = {
+  entrada:['Entrada','ok'], cadastro:['Cadastro / estoque inicial','ok'], compra_seminovo:['Compra de seminovo','ok'], troca:['Entrada por troca','ok'], devolucao_cli:['Devolução de cliente','ok'], cancelamento:['Venda cancelada','ok'],
+  venda:['Venda','pri'], os:['Peça usada em OS','pri'],
+  transf_saida:['Transferência (saída)','vio'], transf_entrada:['Transferência (entrada)','vio'], inventario:['Inventário','vio'],
+  ajuste:['Ajuste','warn'], devolucao_forn:['Devolução ao fornecedor','warn'], uso_interno:['Uso interno','warn'],
+  perda:['Perda / quebra / roubo','bad'], defeito:['Defeito','bad'], baixa:['Baixa','bad']
+};
+// tipos de ajuste manual: [rótulo, sinal, tipo gravado no histórico]
+const AJ_TIPOS = {
+  perda:['Perda / quebra / roubo', -1, 'perda'], defeito:['Defeito (sem conserto)', -1, 'defeito'], devolucao_forn:['Devolução ao fornecedor', -1, 'devolucao_forn'], uso_interno:['Uso interno da loja', -1, 'uso_interno'],
+  devolucao_cli:['Devolução de cliente', 1, 'devolucao_cli'], falta:['Acerto: faltou no estoque', -1, 'ajuste'], sobra:['Acerto: sobrou no estoque', 1, 'ajuste']
+};
+
+/* grava uma linha no histórico de movimentações (nunca derruba a operação principal) */
+async function movEst(m){ try { await save('estoqueMov', {...m, por:S.user?.uid || '', data:Date.now()}); } catch(e){ console.warn('Movimentação de estoque não registrada', e); } }
+/* soma/subtrai do estoque de um acessório/peça e registra no histórico */
+async function mudaEstoque(pid, L, delta, tipo, ref, motivo){
+  const p = byId('produtos', pid); if (!p || !delta) return;
+  const novo = (p.estoque?.[L] || 0) + delta;
+  await save('produtos', {...p, estoque:{...p.estoque, [L]:novo}});
+  await movEst({tipo, item:'produto', itemId:pid, nome:p.nome, codigo:p.codigo || '', lojaId:L, qtd:delta, saldo:novo, ref:ref || '', motivo:motivo || '', valor:(p.custo || 0) * Math.abs(delta)});
+}
+/* registra a entrada/saída de um aparelho (IMEI) no histórico */
+const movAp = (tipo, a, delta, L, ref, motivo) => movEst({tipo, item:'aparelho', itemId:a.id, nome:apNome(a), codigo:a.imei, lojaId:L || a.lojaId, qtd:delta, saldo:null, ref:ref || '', motivo:motivo || '', valor:a.custo || 0});
+function verHistorico(q){ S.f.mv = {per:'tudo', tipo:'', q:q || ''}; S.f.est = {tab:'mov', inv:null}; closeModal(); go('estoque'); }
+const verHistoricoProd = id => verHistorico(byId('produtos', id)?.nome);
+
+/* ---------- ajuste / baixa manual ---------- */
+function ajusteModal(pid){
+  if (precisaLoja()) return; const L = S.lojaId;
+  const prs = D('produtos').filter(p => p.ativo !== false).sort((a, b) => a.nome.localeCompare(b.nome));
+  const aps = D('aparelhos').filter(a => a.lojaId === L && emEst(a.status)).sort((a, b) => apNome(a).localeCompare(apNome(b)));
+  const tp = ks => ks.map(k => `<option value="${k}">${AJ_TIPOS[k][0]}</option>`).join('');
+  openModal('Ajustar estoque — ' + esc(lojaNome(L)), `<form id="f-aj" onsubmit="event.preventDefault();salvarAjuste(event.submitter)">
+  <div class="f"><label>O que você vai ajustar?</label><select name="kind" onchange="$('#aj-p').style.display=this.value==='p'?'':'none';$('#aj-a').style.display=this.value==='a'?'':'none'"><option value="p">Acessório / peça</option><option value="a">Aparelho (IMEI)</option></select></div>
+  <div id="aj-p"><div class="f"><label>Produto</label><select name="prod">${prs.map(p => `<option value="${p.id}" ${p.id === pid ? 'selected' : ''}>${esc(p.nome)} — ${p.estoque?.[L] || 0} un.</option>`).join('')}</select></div>
+  <div class="fg"><div><label>Tipo</label><select name="tipoP">${tp(['perda', 'defeito', 'devolucao_forn', 'uso_interno', 'devolucao_cli', 'falta', 'sobra'])}</select></div><div><label>Quantidade</label><input name="qtd" type="number" min="1" value="1"></div></div></div>
+  <div id="aj-a" style="display:none"><div class="f"><label>Aparelho</label><select name="apar">${aps.map(a => `<option value="${a.id}">${esc(apNome(a))} · ${esc(a.imei)}</option>`).join('') || '<option value="">Nenhum aparelho em estoque nesta loja</option>'}</select></div>
+  <div class="f"><label>Tipo</label><select name="tipoA">${tp(['perda', 'devolucao_forn', 'defeito'])}</select></div></div>
+  <div class="f"><label>Motivo / observação *</label><input name="obs" required placeholder="Ex.: caiu e quebrou no balcão"></div>
+  <button class="btn pri big">Registrar ajuste</button></form>`);
+}
+async function salvarAjuste(btn){
+  const f = form('f-aj'), L = S.lojaId; if (!f.obs) return toast('Explique o motivo do ajuste', 'warn');
+  if (f.kind === 'p'){
+    const p = byId('produtos', f.prod), t = AJ_TIPOS[f.tipoP], q = parseInt(f.qtd) || 0;
+    if (!p || q <= 0) return toast('Informe o produto e a quantidade', 'warn');
+    const delta = t[1] * q, atual = p.estoque?.[L] || 0;
+    if (atual + delta < 0) return toast(`Só há ${atual} un. em ${lojaNome(L)}`, 'bad');
+    if (btn) btn.disabled = true;
+    await mudaEstoque(p.id, L, delta, t[2], t[0], f.obs);
+    toast(`${delta > 0 ? '+' : ''}${delta} un. de ${p.nome}`);
+  } else {
+    const a = byId('aparelhos', f.apar), t = AJ_TIPOS[f.tipoA];
+    if (!a) return toast('Escolha o aparelho', 'warn');
+    if (btn) btn.disabled = true;
+    await save('aparelhos', {...a, status:f.tipoA === 'defeito' ? 'defeito' : 'baixado'});
+    await movAp(t[2], a, -1, L, t[0], f.obs);
+    toast('Baixa registrada: ' + apNome(a));
+  }
+  closeModal(); render();
+}
+
+/* ---------- tela principal ---------- */
+VIEWS.estoque = () => {
+  const e = S.f.est || (S.f.est = {tab:'mov', inv:null});
+  if (e.tab === 'inv' && e.inv && byId('inventarios', e.inv)) return estInvDetalhe(byId('inventarios', e.inv));
+  const tabs = [['mov', 'Movimentações'], ['inv', 'Inventário'], ['rel', 'Reposição e relatórios']];
+  main(`<div class="row mb"><div class="tabs" style="margin:0">${tabs.map(([k, n]) => `<button class="${e.tab === k ? 'on' : ''}" onclick="S.f.est.tab='${k}';S.f.est.inv=null;render()">${n}</button>`).join('')}</div><span class="sp"></span><button class="btn pri" onclick="ajusteModal()">Ajustar estoque</button></div>`
+    + (e.tab === 'mov' ? estMovTab() : e.tab === 'inv' ? estInvTab() : estRelTab()));
+};
+
+function estMovTab(){
+  const f = S.f.mv || (S.f.mv = {per:'30', tipo:'', q:''}), q = f.q.toLowerCase();
+  const ini = f.per === 'tudo' ? 0 : hoje0() - (+f.per) * DIA;
+  const l = D('estoqueMov').filter(m => naLoja(m) && m.data >= ini && (!f.tipo || m.tipo === f.tipo) && (!q || [m.nome, m.codigo, m.ref, m.motivo].join(' ').toLowerCase().includes(q))).sort((a, b) => b.data - a.data);
+  const ent = soma(l.filter(m => m.qtd > 0), m => m.qtd), sai = soma(l.filter(m => m.qtd < 0), m => -m.qtd);
+  return `<div class="row mb"><select style="width:auto" onchange="S.f.mv.per=this.value;render()">${[['0', 'Hoje'], ['7', 'Últimos 7 dias'], ['30', 'Últimos 30 dias'], ['90', 'Últimos 90 dias'], ['tudo', 'Tudo']].map(([k, n]) => `<option value="${k}" ${f.per === k ? 'selected' : ''}>${n}</option>`).join('')}</select>
+  <select style="width:auto" onchange="S.f.mv.tipo=this.value;render()"><option value="">Todos os tipos</option>${Object.entries(MOV_TIPO).map(([k, v]) => `<option value="${k}" ${f.tipo === k ? 'selected' : ''}>${v[0]}</option>`).join('')}</select><span class="sp"></span>
+  <input style="max-width:280px" placeholder="Buscar produto, IMEI ou motivo" value="${esc(f.q)}" onchange="S.f.mv.q=this.value;render()"></div>
+  <div class="grid g3 mb"><div class="card kpi"><small>Movimentações</small><b>${l.length}</b></div><div class="card kpi"><small>Entradas</small><b>+${ent}</b><span>unidades</span></div><div class="card kpi"><small>Saídas</small><b>−${sai}</b><span>unidades</span></div></div>
+  <div class="card tw"><table><thead><tr><th>Data</th><th>Tipo</th><th>Item</th><th>Loja</th><th class="r">Qtd</th><th class="r">Saldo</th><th>Detalhe</th><th>Por</th></tr></thead><tbody>
+  ${l.slice(0, 300).map(m => `<tr><td><small>${dth(m.data)}</small></td><td><span class="tag ${MOV_TIPO[m.tipo]?.[1] || ''}">${esc(MOV_TIPO[m.tipo]?.[0] || m.tipo)}</span></td><td><b>${esc(m.nome)}</b>${m.codigo ? `<br><small>${m.item === 'aparelho' ? 'IMEI ' : ''}${esc(m.codigo)}</small>` : ''}</td><td>${esc(lojaNome(m.lojaId))}</td>
+    <td class="r"><span class="tag ${m.qtd > 0 ? 'ok' : 'bad'}">${m.qtd > 0 ? '+' : ''}${m.qtd}</span></td><td class="r">${m.saldo == null ? '—' : m.saldo}</td><td>${esc(m.ref || '')}${m.motivo ? `<br><small>${esc(m.motivo)}</small>` : ''}</td><td><small>${esc(userNome(m.por))}</small></td></tr>`).join('')
+    || '<tr><td colspan="8" class="empty">Nenhuma movimentação neste filtro. O histórico começa a ser registrado a partir da instalação desta função.</td></tr>'}</tbody></table></div>
+  ${l.length > 300 ? `<p class="mut mt">Mostrando as 300 mais recentes de ${l.length}. Use os filtros para refinar.</p>` : ''}`;
+}
+
+/* ---------- inventário (contagem) ---------- */
+function estInvTab(){
+  const l = recentes('inventarios').filter(i => lojasPermitidas().includes(i.lojaId) && (S.lojaId === '*' || i.lojaId === S.lojaId));
+  return `<div class="row mb"><button class="btn pri" onclick="invNovo()">+ Nova contagem</button><span class="mut">Conte o que tem na prateleira; o sistema mostra as diferenças e só ajusta quando você confirmar.</span></div>
+  <div class="card tw"><table><thead><tr><th>Nº</th><th>Loja</th><th>Início</th><th>Status</th><th>Resultado</th><th></th></tr></thead><tbody>
+  ${l.map(i => `<tr class="click" onclick="S.f.est.inv='${i.id}';render()"><td>#${pad(i.numero)}</td><td>${esc(lojaNome(i.lojaId))}</td><td>${dth(i.criadoEm)}</td><td><span class="tag ${i.status === 'aberto' ? 'warn' : 'ok'}">${i.status === 'aberto' ? 'Em andamento' : 'Finalizado ' + dt(i.finalizadoEm)}</span></td>
+    <td><small>${i.status === 'aberto' ? Object.keys(i.contagens || {}).length + ' produto(s) contado(s) · ' + (i.conferidos || []).length + ' aparelho(s) conferido(s)' : `${i.resumo.ajustes} ajuste(s) · ${i.resumo.unidades > 0 ? '+' : ''}${i.resumo.unidades} un. (${brl(i.resumo.valor)})${i.resumo.baixados ? ' · ' + i.resumo.baixados + ' aparelho(s) baixado(s)' : ''}`}</small></td><td class="r"><button class="btn sm">${i.status === 'aberto' ? 'Continuar' : 'Ver'}</button></td></tr>`).join('')
+    || '<tr><td colspan="6" class="empty">Nenhuma contagem ainda.</td></tr>'}</tbody></table></div>`;
+}
+async function invNovo(){
+  if (precisaLoja()) return;
+  const ab = D('inventarios').find(i => i.lojaId === S.lojaId && i.status === 'aberto');
+  if (ab){ S.f.est.inv = ab.id; toast('Já existe uma contagem em andamento nesta loja', 'warn'); return render(); }
+  const inv = await save('inventarios', {numero:prox('inventarios'), lojaId:S.lojaId, status:'aberto', contagens:{}, conferidos:[], criadoPor:S.user.uid});
+  S.f.est.inv = inv.id; render();
+}
+const invDifTag = d => d == null ? '<span class="mut">—</span>' : `<span class="tag ${d === 0 ? 'ok' : 'bad'}">${d > 0 ? '+' : ''}${d}</span>`;
+function estInvDetalhe(inv){
+  const L = inv.lojaId, voltar = `<button class="btn" onclick="S.f.est.inv=null;render()">← Voltar</button>`;
+  if (inv.status !== 'aberto'){
+    return main(`<div class="row mb">${voltar}<h3>Inventário #${pad(inv.numero)} — ${esc(lojaNome(L))}</h3><span class="tag ok">Finalizado ${dth(inv.finalizadoEm)} por ${esc(userNome(inv.finalizadoPor))}</span></div>
+    <div class="grid g3 mb"><div class="card kpi"><small>Produtos ajustados</small><b>${inv.resumo.ajustes}</b></div><div class="card kpi"><small>Diferença em unidades</small><b>${inv.resumo.unidades > 0 ? '+' : ''}${inv.resumo.unidades}</b></div><div class="card kpi"><small>Diferença a custo</small><b>${brl(inv.resumo.valor)}</b></div></div>
+    <div class="card mb"><h3 class="mb">Acessórios e peças ajustados</h3><div class="tw"><table><thead><tr><th>Produto</th><th class="r">Sistema</th><th class="r">Contado</th><th class="r">Diferença</th></tr></thead><tbody>${(inv.itens || []).map(x => `<tr><td>${esc(x.nome)}</td><td class="r">${x.sis}</td><td class="r">${x.contado}</td><td class="r">${invDifTag(x.d)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Nenhuma diferença — o estoque estava certo.</td></tr>'}</tbody></table></div></div>
+    ${(inv.faltantes || []).length ? `<div class="card"><h3 class="mb">Aparelhos não encontrados na contagem</h3><div class="tw"><table><tbody>${inv.faltantes.map(x => `<tr><td>${esc(x.nome)}<br><small>IMEI ${esc(x.imei)}</small></td><td class="r"><span class="tag ${x.baixado ? 'bad' : 'warn'}">${x.baixado ? 'Baixado' : 'Mantido no estoque'}</span></td></tr>`).join('')}</tbody></table></div></div>` : ''}`);
+  }
+  const q = (S.f.invq || '').toLowerCase(), conf = inv.conferidos || [];
+  const prs = D('produtos').filter(p => p.ativo !== false && (!q || (p.nome + ' ' + (p.codigo || '')).toLowerCase().includes(q))).sort((a, b) => a.nome.localeCompare(b.nome));
+  const aps = D('aparelhos').filter(a => a.lojaId === L && emEst(a.status)).sort((a, b) => apNome(a).localeCompare(apNome(b)));
+  main(`<div class="row mb">${voltar}<h3>Inventário #${pad(inv.numero)} — ${esc(lojaNome(L))}</h3><span class="sp"></span><button class="btn bad" onclick="invCancelar('${inv.id}')">Cancelar contagem</button><button class="btn ok" onclick="invFinalizar('${inv.id}')">Finalizar e ajustar</button></div>
+  <p class="mut mb">Digite quanto você contou de cada item. O que ficar em branco não é alterado. A contagem fica salva automaticamente. Evite vender durante a contagem, senão o saldo do sistema muda enquanto você conta.</p>
+  <div class="card mb"><div class="row mb"><h3>Acessórios e peças</h3><span class="sp"></span><input style="max-width:240px" placeholder="Filtrar por nome ou código" value="${esc(S.f.invq || '')}" onchange="S.f.invq=this.value;render()"></div>
+  <div class="tw"><table><thead><tr><th>Produto</th><th class="r">No sistema</th><th class="r" style="width:120px">Contado</th><th class="r">Diferença</th></tr></thead><tbody>
+  ${prs.map(p => { const sis = p.estoque?.[L] || 0, c = inv.contagens?.[p.id]; return `<tr><td><b>${esc(p.nome)}</b>${p.codigo ? `<br><small>${esc(p.codigo)}</small>` : ''}</td><td class="r">${sis}</td><td class="r"><input type="number" min="0" value="${c ?? ''}" style="width:90px;text-align:right" onchange="invSet('${inv.id}','${p.id}',this.value)"></td><td class="r" id="d-${p.id}">${invDifTag(c == null ? null : c - sis)}</td></tr>`; }).join('') || '<tr><td colspan="4" class="empty">Nenhum produto encontrado.</td></tr>'}</tbody></table></div></div>
+  <div class="card"><div class="row mb"><h3>Aparelhos (IMEI)</h3><span class="mut" id="inv-ap-n">${conf.filter(id => aps.some(a => a.id === id)).length} de ${aps.length} conferidos</span><span class="sp"></span>
+  <input id="inv-imei" style="max-width:280px" placeholder="Bipe ou digite o IMEI e tecle Enter" inputmode="numeric" onkeydown="if(event.key==='Enter'){event.preventDefault();invScan('${inv.id}',this)}"></div>
+  <div class="checks" style="grid-template-columns:1fr;max-height:360px;overflow:auto">${aps.map(a => `<label class="check"><input type="checkbox" ${conf.includes(a.id) ? 'checked' : ''} onchange="invAp('${inv.id}','${a.id}',this.checked)"> ${esc(apNome(a))} <small class="mut">· ${esc(a.imei)}</small></label>`).join('') || '<span class="mut">Nenhum aparelho em estoque nesta loja.</span>'}</div></div>`);
+}
+async function invSet(id, pid, v){
+  const inv = byId('inventarios', id), p = byId('produtos', pid); if (!inv || !p) return;
+  const contagens = {...(inv.contagens || {})}; v = String(v).trim();
+  if (v === '') delete contagens[pid]; else contagens[pid] = Math.max(0, parseInt(v) || 0);
+  await save('inventarios', {...inv, contagens});
+  const c = $('#d-' + pid); if (c) c.innerHTML = invDifTag(contagens[pid] == null ? null : contagens[pid] - (p.estoque?.[inv.lojaId] || 0));
+}
+async function invAp(id, apId, on){
+  const inv = byId('inventarios', id); const conferidos = (inv.conferidos || []).filter(x => x !== apId); if (on) conferidos.push(apId);
+  await save('inventarios', {...inv, conferidos});
+  const aps = D('aparelhos').filter(a => a.lojaId === inv.lojaId && emEst(a.status)), n = $('#inv-ap-n');
+  if (n) n.textContent = `${conferidos.filter(x => aps.some(a => a.id === x)).length} de ${aps.length} conferidos`;
+}
+async function invScan(id, el){
+  const code = el.value.replace(/\D/g, ''); el.value = ''; if (!code) return;
+  const inv = byId('inventarios', id);
+  const a = D('aparelhos').find(a => a.lojaId === inv.lojaId && emEst(a.status) && (a.imei === code || a.imei2 === code));
+  if (!a){ const o = D('aparelhos').find(a => a.imei === code || a.imei2 === code); return toast(o ? `Este IMEI está em ${lojaNome(o.lojaId)} (${ST_AP[o.status]?.[0] || o.status}), não no estoque desta loja` : 'IMEI não encontrado no sistema', 'warn'); }
+  if ((inv.conferidos || []).includes(a.id)) return toast('Já conferido: ' + apNome(a), 'warn');
+  await save('inventarios', {...inv, conferidos:[...(inv.conferidos || []), a.id]});
+  toast('Conferido: ' + apNome(a)); render(); setTimeout(() => $('#inv-imei')?.focus(), 50);
+}
+async function invCancelar(id){ if (!confirm('Cancelar esta contagem? O que foi digitado será descartado e o estoque não muda.')) return; await apagar('inventarios', id); S.f.est.inv = null; toast('Contagem cancelada'); render(); }
+function invResumo(inv){
+  const L = inv.lojaId;
+  const dif = Object.entries(inv.contagens || {}).map(([pid, n]) => { const p = byId('produtos', pid); if (!p) return null; const sis = p.estoque?.[L] || 0; return {p, sis, n, d:n - sis}; }).filter(x => x && x.d !== 0);
+  const aps = D('aparelhos').filter(a => a.lojaId === L && emEst(a.status));
+  const falt = (inv.conferidos || []).length ? aps.filter(a => !inv.conferidos.includes(a.id)) : [];
+  return {dif, falt};
+}
+function invFinalizar(id){
+  const inv = byId('inventarios', id), r = invResumo(inv);
+  openModal('Finalizar inventário #' + pad(inv.numero), `<p class="mut mb">${r.dif.length ? `${r.dif.length} produto(s) com diferença. Ao confirmar, o estoque passa a ser o que você contou e cada ajuste fica no histórico.` : 'Nenhuma diferença nos produtos contados.'}</p>
+  ${r.dif.length ? `<div class="tw mb" style="max-height:260px;overflow:auto"><table><thead><tr><th>Produto</th><th class="r">Sistema</th><th class="r">Contado</th><th class="r">Diferença</th></tr></thead><tbody>${r.dif.map(x => `<tr><td>${esc(x.p.nome)}</td><td class="r">${x.sis}</td><td class="r">${x.n}</td><td class="r">${invDifTag(x.d)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+  ${r.falt.length ? `<h3 class="sub">Aparelhos não encontrados (${r.falt.length})</h3><div class="mb" style="max-height:160px;overflow:auto">${r.falt.map(a => `<div class="res" style="cursor:default"><div><b>${esc(apNome(a))}</b><small>IMEI ${esc(a.imei)}</small></div></div>`).join('')}</div>
+  <label class="check mb"><input type="checkbox" id="inv-baixar"> Dar baixa nesses aparelhos (marcar como baixado). Só marque se você conferiu todas as prateleiras.</label>` : ''}
+  <button class="btn pri big" onclick="invConfirmar('${id}',this)">Confirmar e ajustar estoque</button>`, {wide:true});
+}
+async function invConfirmar(id, btn){
+  const inv = byId('inventarios', id), r = invResumo(inv), baixar = !!$('#inv-baixar')?.checked, ref = 'Inventário #' + pad(inv.numero);
+  btn.disabled = true;
+  for (const x of r.dif) await mudaEstoque(x.p.id, inv.lojaId, x.d, 'inventario', ref);
+  if (baixar) for (const a of r.falt){ await save('aparelhos', {...a, status:'baixado'}); await movAp('baixa', a, -1, inv.lojaId, ref, 'Não encontrado na contagem'); }
+  await save('inventarios', {...inv, status:'finalizado', finalizadoEm:Date.now(), finalizadoPor:S.user.uid,
+    itens:r.dif.map(x => ({nome:x.p.nome, sis:x.sis, contado:x.n, d:x.d})), faltantes:r.falt.map(a => ({nome:apNome(a), imei:a.imei, baixado:baixar})),
+    resumo:{ajustes:r.dif.length, unidades:soma(r.dif, x => x.d), valor:soma(r.dif, x => x.d * (x.p.custo || 0)), faltantes:r.falt.length, baixados:baixar ? r.falt.length : 0}});
+  closeModal(); toast('Inventário finalizado e estoque ajustado'); render();
+}
+
+/* ---------- reposição e relatórios ---------- */
+function reposicaoLista(){
+  const lojas = S.lojaId === '*' ? lojasPermitidas() : [S.lojaId], out = [];
+  for (const p of D('produtos').filter(p => p.ativo !== false)) for (const L of lojas){
+    const s = p.estoque?.[L] || 0, min = p.minimo || 0;
+    if (s <= min){ const sug = Math.max(min * 2 - s, 1); out.push({p, L, s, min, sug, custo:sug * (p.custo || 0)}); }
+  }
+  return out.sort((a, b) => a.s - b.s || a.p.nome.localeCompare(b.p.nome));
+}
+function reposicaoCopiar(){
+  const multi = S.lojaId === '*' && lojasPermitidas().length > 1;
+  const t = 'Lista de reposição — ' + S.empresa.nome + '\n' + reposicaoLista().map(x => `• ${x.p.nome}${multi ? ' (' + lojaNome(x.L) + ')' : ''} — pedir ${x.sug} (tem ${x.s})`).join('\n');
+  navigator.clipboard.writeText(t).then(() => toast('Lista copiada'), () => toast('Não foi possível copiar', 'bad'));
+}
+function reposicaoImprimir(){
+  const l = reposicaoLista(), multi = S.lojaId === '*' && lojasPermitidas().length > 1;
+  printDoc(cab(S.lojaId === '*' ? lojasPermitidas()[0] : S.lojaId, 'LISTA DE REPOSIÇÃO — ' + dt(Date.now())) + `<table><thead><tr><th>Produto</th>${multi ? '<th>Loja</th>' : ''}<th>Tem</th><th>Mínimo</th><th>Pedir</th><th>Custo estimado</th></tr></thead><tbody>${l.map(x => `<tr><td>${esc(x.p.nome)}</td>${multi ? `<td>${esc(lojaNome(x.L))}</td>` : ''}<td>${x.s}</td><td>${x.min}</td><td><b>${x.sug}</b></td><td>${brl(x.custo)}</td></tr>`).join('')}</tbody></table><p style="margin-top:10px"><b>Total estimado: ${brl(soma(l, x => x.custo))}</b></p>`);
+}
+function estRelTab(){
+  const lojas = S.lojaId === '*' ? lojasPermitidas() : [S.lojaId], multi = lojas.length > 1;
+  const prs = D('produtos').filter(p => p.ativo !== false), un = p => soma(lojas, L => p.estoque?.[L] || 0);
+  const aps = D('aparelhos').filter(a => lojas.includes(a.lojaId) && emEst(a.status));
+  const vCusto = soma(prs, p => un(p) * (p.custo || 0)) + soma(aps, a => a.custo), vVenda = soma(prs, p => un(p) * (p.preco || 0)) + soma(aps, a => a.preco);
+  const rep = reposicaoLista(), zer = rep.filter(x => x.s <= 0).length;
+  const now = Date.now(), d30 = now - 30 * DIA, d60 = now - 60 * DIA;
+  const vend = {}, ult = {};
+  for (const v of D('vendas').filter(v => v.status !== 'cancelada' && lojas.includes(v.lojaId))) for (const i of v.itens) if (i.tipo !== 'aparelho'){
+    ult[i.refId] = Math.max(ult[i.refId] || 0, v.data);
+    if (v.data >= d30){ const o = vend[i.refId] || (vend[i.refId] = {q:0, r:0}); o.q += i.qtd; o.r += i.preco * i.qtd; }
+  }
+  for (const o of D('os').filter(o => lojas.includes(o.lojaId) && o.estoqueBaixado)) for (const i of (o.itens || []).filter(i => i.produtoId)) ult[i.produtoId] = Math.max(ult[i.produtoId] || 0, o.entregueEm || o.criadoEm || 0);
+  const top = Object.entries(vend).map(([id, o]) => ({p:byId('produtos', id), ...o})).filter(x => x.p).sort((a, b) => b.q - a.q).slice(0, 10);
+  const parados = prs.filter(p => un(p) > 0 && (ult[p.id] || 0) < d60 && (p.criadoEm || 0) < d60).map(p => ({p, q:un(p), cap:un(p) * (p.custo || 0), ult:ult[p.id] || 0})).sort((a, b) => b.cap - a.cap).slice(0, 10);
+  const antigos = aps.slice().sort((a, b) => (a.criadoEm || 0) - (b.criadoEm || 0)).slice(0, 10);
+  return `<div class="grid g4 mb">
+    <div class="card kpi"><small>Valor do estoque (custo)</small><b>${brl(vCusto)}</b><span>${aps.length} aparelho(s) + ${soma(prs, un)} acessório(s)/peça(s)</span></div>
+    <div class="card kpi"><small>Valor do estoque (venda)</small><b>${brl(vVenda)}</b><span>margem potencial ${brl(vVenda - vCusto)}</span></div>
+    <div class="card kpi"><small>Abaixo do mínimo</small><b>${rep.length}</b><span>item(ns) para repor</span></div>
+    <div class="card kpi"><small>Zerados</small><b>${zer}</b><span>sem nenhuma unidade</span></div></div>
+  <div class="card mb"><div class="row mb"><h3>Lista de reposição</h3><span class="sp"></span><button class="btn sm" onclick="reposicaoCopiar()" ${rep.length ? '' : 'disabled'}>Copiar (WhatsApp)</button><button class="btn sm" onclick="reposicaoImprimir()" ${rep.length ? '' : 'disabled'}>${ico('print')} Imprimir</button></div>
+  <p class="mut mb">Itens com estoque igual ou abaixo do mínimo. A sugestão leva o estoque até o dobro do mínimo (ajuste o mínimo no cadastro do produto).</p>
+  <div class="tw"><table><thead><tr><th>Produto</th>${multi ? '<th>Loja</th>' : ''}<th class="r">Tem</th><th class="r">Mínimo</th><th class="r">Sugestão</th><th class="r">Custo estimado</th></tr></thead><tbody>
+  ${rep.map(x => `<tr><td><b>${esc(x.p.nome)}</b><br><small>${esc(x.p.categoria)}</small></td>${multi ? `<td>${esc(lojaNome(x.L))}</td>` : ''}<td class="r"><span class="tag ${x.s <= 0 ? 'bad' : 'warn'}">${x.s}</span></td><td class="r">${x.min}</td><td class="r"><b>${x.sug}</b></td><td class="r">${brl(x.custo)}</td></tr>`).join('') || `<tr><td colspan="${multi ? 6 : 5}" class="empty">Nada abaixo do mínimo.</td></tr>`}</tbody>
+  ${rep.length ? `<tfoot><tr><td colspan="${multi ? 5 : 4}" class="r"><b>Total estimado</b></td><td class="r"><b>${brl(soma(rep, x => x.custo))}</b></td></tr></tfoot>` : ''}</table></div></div>
+  <div class="grid g2 mb">
+    <div class="card"><h3 class="mb">Mais vendidos (30 dias)</h3><div class="tw"><table><thead><tr><th>Produto</th><th class="r">Vendidos</th><th class="r">Receita</th><th class="r">Em estoque</th></tr></thead><tbody>${top.map(x => `<tr><td>${esc(x.p.nome)}</td><td class="r">${x.q}</td><td class="r">${brl(x.r)}</td><td class="r">${un(x.p)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Sem vendas de acessórios nos últimos 30 dias.</td></tr>'}</tbody></table></div></div>
+    <div class="card"><h3 class="mb">Parados há mais de 60 dias</h3><div class="tw"><table><thead><tr><th>Produto</th><th class="r">Qtd</th><th class="r">Dinheiro parado</th><th>Última saída</th></tr></thead><tbody>${parados.map(x => `<tr><td>${esc(x.p.nome)}</td><td class="r">${x.q}</td><td class="r">${brl(x.cap)}</td><td><small>${x.ult ? dt(x.ult) : 'nunca saiu'}</small></td></tr>`).join('') || '<tr><td colspan="4" class="empty">Nenhum item parado.</td></tr>'}</tbody></table></div></div>
+  </div>
+  <div class="card"><h3 class="mb">Aparelhos há mais tempo no estoque</h3><div class="tw"><table><thead><tr><th>Aparelho</th><th>IMEI</th>${multi ? '<th>Loja</th>' : ''}<th class="r">Custo</th><th class="r">Preço</th><th class="r">Dias em estoque</th></tr></thead><tbody>${antigos.map(a => `<tr class="click" onclick="aparelhoModal('${a.id}')"><td><b>${esc(apNome(a))}</b></td><td><small>${esc(a.imei)}</small></td>${multi ? `<td>${esc(lojaNome(a.lojaId))}</td>` : ''}<td class="r">${brl(a.custo)}</td><td class="r">${brl(a.preco)}</td><td class="r"><span class="tag ${now - (a.criadoEm || now) > 60 * DIA ? 'warn' : ''}">${Math.floor((now - (a.criadoEm || now)) / DIA)}</span></td></tr>`).join('') || `<tr><td colspan="${multi ? 6 : 5}" class="empty">Nenhum aparelho em estoque.</td></tr>`}</tbody></table></div></div>`;
 }
 
 /* =====================================================================

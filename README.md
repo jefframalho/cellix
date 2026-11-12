@@ -8,6 +8,7 @@ Sistema por assinatura para várias lojas de celular e assistências técnicas: 
 - **PDV + caixa**: venda de aparelhos e acessórios, leitor de código de barras, várias formas de pagamento, crédito parcelado, troco, desconto, recibo impresso e por WhatsApp; abertura, sangria, suprimento e fechamento de caixa com conferência
 - **Estoque por IMEI**: cada aparelho com IMEI validado (não deixa repetir), novo/seminovo, bateria, custo e preço
 - **Acessórios e peças**: estoque separado por loja, alerta de estoque baixo, entrada de mercadoria
+- **Controle de estoque**: histórico de toda movimentação (entrada, venda, cancelamento, OS, transferência, ajuste) com quem fez e quando; ajuste/baixa manual com motivo (perda, defeito, devolução ao fornecedor); inventário com contagem por produto e conferência de aparelhos por IMEI; lista de reposição (copiar para WhatsApp ou imprimir), valor do estoque, mais vendidos e itens parados
 - **Ordem de serviço**: checklist de entrada, senha, orçamento com peças do estoque, status, técnico, sinal, entrega com garantia, via impressa e aviso ao cliente no WhatsApp
 - **Seminovos / troca**: avaliação com checklist (iCloud, IMEI, bateria), compra direta ou troca usada como entrada no PDV, termo de procedência para o cliente assinar
 - **Transferências entre lojas** com confirmação de recebimento
